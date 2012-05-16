@@ -23,21 +23,42 @@ import com.android.internal.widget.LockPatternUtils;
 import com.android.internal.widget.TransportControlView;
 import com.android.internal.policy.impl.KeyguardUpdateMonitor.SimStateCallback;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Date;
 
+import org.w3c.dom.Document;
+
 import libcore.util.MutableInt;
 
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.res.Resources;
+import android.location.Criteria;
+import android.location.Location;
+import android.location.LocationManager;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.Message;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.text.format.DateFormat;
 import android.util.Log;
+import android.util.Slog;
 import android.view.View;
 import android.view.View.OnClickListener;
 import android.widget.Button;
+import android.widget.ImageView;
+import android.widget.RelativeLayout;
 import android.widget.TextView;
+
+import com.android.internal.util.weather.HttpRetriever;
+import com.android.internal.util.weather.WeatherInfo;
+import com.android.internal.util.weather.WeatherXmlParser;
+import com.android.internal.util.weather.YahooPlaceFinder;
 
 /***
  * Manages a number of views inside of LockScreen layouts. See below for a list of widgets
@@ -72,6 +93,9 @@ class KeyguardStatusViewManager implements OnClickListener {
     private TextView mOwnerInfoView;
     private TextView mAlarmStatusView;
     private TransportControlView mTransportView;
+    private RelativeLayout mWeatherPanel;
+    private TextView mWeatherCity, mWeatherCondition, mWeatherLowHigh, mWeatherTemp;
+    private ImageView mWeatherImage;
 
     // Top-level container view for above views
     private View mContainer;
@@ -182,6 +206,19 @@ class KeyguardStatusViewManager implements OnClickListener {
         mEmergencyCallButton = (Button) findViewById(R.id.emergencyCallButton);
         mEmergencyCallButtonEnabledInScreen = emergencyButtonEnabledInScreen;
 
+        // Weather panel
+        mWeatherPanel = (RelativeLayout) findViewById(R.id.weather_panel);
+        mWeatherCity = (TextView) findViewById(R.id.weather_city);
+        mWeatherCondition = (TextView) findViewById(R.id.weather_condition);
+        mWeatherImage = (ImageView) findViewById(R.id.weather_image);
+        mWeatherTemp = (TextView) findViewById(R.id.weather_temp);
+        mWeatherLowHigh = (TextView) findViewById(R.id.weather_low_high);
+
+        // Hide Weather panel view until we know we need to show it.
+        if (mWeatherPanel != null) {
+            mWeatherPanel.setVisibility(View.GONE);
+        }
+
         // Hide transport control view until we know we need to show it.
         if (mTransportView != null) {
             mTransportView.setVisibility(View.GONE);
@@ -201,6 +238,7 @@ class KeyguardStatusViewManager implements OnClickListener {
         resetStatusInfo();
         refreshDate();
         updateOwnerInfo();
+        refreshWeather();
 
         // Required to get Marquee to work.
         final View scrollableViews[] = { mCarrierView, mDateView, mStatus1View, mOwnerInfoView,
@@ -210,6 +248,144 @@ class KeyguardStatusViewManager implements OnClickListener {
                 v.setSelected(true);
             }
         }
+    }
+
+    // ------------------------------------------------ START ------------------------------------------------------
+    private void refreshWeather() {
+        final ContentResolver resolver = getContext().getContentResolver();
+        final Resources res = getContext().getResources();
+        boolean showWeather = Settings.System.getInt(resolver, Settings.System.LOCKSCREEN_WEATHER, 0) == 1;
+        final boolean showLocation = Settings.System.getInt(resolver, Settings.System.WEATHER_SHOW_LOCATION, 0) == 1;
+
+        if (showWeather) {
+            mContainer.post(new Runnable() {
+                @Override
+                public void run() {
+                    /*
+                    LocationManager locationManager = (LocationManager) getContext().getSystemService(Context.LOCATION_SERVICE);
+                    Intent intent = new Intent();
+                    String woeid = null;
+                    // custom location
+                    boolean useCustomLoc = WeatherPrefs.getUseCustomLocation(getApplicationContext());
+                    String customLoc = WeatherPrefs.getCustomLocation(getApplicationContext());
+                    if (customLoc != null && useCustomLoc) {
+                        woeid = YahooPlaceFinder.GeoCode(getApplicationContext(), customLoc);
+                    // network location
+                    } else {
+                        if (!intent.hasExtra("newlocation")) {
+                            intent.putExtra("newlocation", true);
+                            PendingIntent pi = PendingIntent.getService(getContext(), 0, intent,
+                                    PendingIntent.FLAG_CANCEL_CURRENT);
+                            locationManager.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, pi);
+                            return;
+                        }
+
+                        Criteria crit = new Criteria();
+                        crit.setAccuracy(Criteria.ACCURACY_COARSE);
+                        String bestProvider = locationManager.getBestProvider(crit, true);
+                        Location loc = null;
+                        if (bestProvider != null) {
+                            loc = locationManager.getLastKnownLocation(bestProvider);
+                        } else {
+                            loc = locationManager.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER);
+                        }
+                        try {
+                            woeid = YahooPlaceFinder.reverseGeoCode(getContext(), loc.getLatitude(),
+                                    loc.getLongitude());
+                            Log.d("************************************", "Location code is " + woeid);
+                        } catch (Exception e) {
+                            e.printStackTrace();
+                            Log.d("************************************", "ERROR: Could not get Location code");
+                        }
+                    }
+                    */
+
+                    String woeid = YahooPlaceFinder.GeoCode(getContext(), "toronto"); // TODO: location code
+                    if (woeid != null) {
+                        if (DEBUG) Log.d(TAG, "Location code is " + woeid);
+                        WeatherInfo w = null;
+                        try {
+                            w = parseXml(getDocument(woeid));
+                        } catch (Exception e) {
+                            Log.e(TAG, "Unable to parse weather XML");
+                        } finally {
+                            if (mWeatherCity != null) {
+                                mWeatherCity.setText(w.city);
+                                mWeatherCity.setVisibility(showLocation ? View.VISIBLE : View.GONE);
+                            }
+                            if (mWeatherCondition != null) {
+                                mWeatherCondition.setText(w.condition);
+                            }
+                            if (mWeatherTemp != null) {
+                                mWeatherTemp.setText(w.temp);
+                            }
+                            if (mWeatherLowHigh != null) {
+                                mWeatherLowHigh.setText(w.low + " | " + w.high);
+                            }
+                            if (mWeatherImage != null) {
+                                String conditionCode = w.condition_code;
+                                String condition_filename = "weather_" + conditionCode;
+                                int resID = res.getIdentifier(condition_filename, "drawable",
+                                        getContext().getPackageName());
+
+                                if (DEBUG)
+                                    Log.d("Weather", "Condition:" + conditionCode + " ID:" + resID);
+
+                                if (resID != 0) {
+                                    mWeatherImage.setImageDrawable(res.getDrawable(resID));
+                                } else {
+                                    mWeatherImage.setImageResource(R.drawable.ic_dialog_alert);
+                                }
+                            }
+
+                                // Show the Weather panel view
+                            if (mWeatherPanel != null) {
+                                mWeatherPanel.setVisibility(View.VISIBLE);
+                            }
+                        }
+                    }
+                }
+                
+            });
+
+        } else {
+            // Hide the Weather panel view
+            if (mWeatherPanel != null) {
+                mWeatherPanel.setVisibility(View.GONE);
+            }
+        }
+    }
+
+    private static final String URL_YAHOO_API_WEATHER = "http://weather.yahooapis.com/forecastrss?w=%s&u=";
+
+    private Document getDocument(String woeid) {
+        try {
+            boolean celcius = Settings.System.getInt(getContext().getContentResolver(),
+                    Settings.System.WEATHER_USE_METRIC, 0) == 1;
+            String urlWithDegreeUnit;
+
+            if (celcius) {
+                urlWithDegreeUnit = URL_YAHOO_API_WEATHER + "c";
+            } else {
+                urlWithDegreeUnit = URL_YAHOO_API_WEATHER + "f";
+            }
+
+            return new HttpRetriever().getDocumentFromURL(String.format(urlWithDegreeUnit, woeid));
+        } catch (IOException e) {
+            Log.e(TAG, "Error querying Yahoo weather");
+        }
+
+        return null;
+    }
+
+    private WeatherInfo parseXml(Document wDoc) {
+        try {
+            return new WeatherXmlParser(getContext()).parseWeatherResponse(wDoc);
+        } catch (Exception e) {
+            // TODO: Handle gracefully
+            e.printStackTrace();
+        }
+        return null;
     }
 
     private boolean inWidgetMode() {
